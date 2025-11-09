@@ -2,27 +2,30 @@ name: Atualizar Descontos Amazon ES
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/15 * * * *"   # Atualiza a cada 15 minutos
   workflow_dispatch:
 
 jobs:
-  update:
+  update-deals:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-    - name: Checkout
+    - name: Checkout código
       uses: actions/checkout@v4
 
     - name: Instalar jq
       run: sudo apt-get update && sudo apt-get install -y jq
 
-    - name: Obter Ofertas Amazon.es (Dataset Público Apify)
+    - name: Buscar Descontos Amazon.es (Dataset Público Apify)
       run: |
+        # Buscar dataset público e estável de ofertas Amazon ES
         curl -s "https://api.apify.com/v2/datasets/rxQ3wQJ8ZC3LOJ28F/items?clean=true&format=json" > raw.json
 
+        # Criar filtro em jq
         cat << 'EOF' > filter.jq
         [
-          .[] 
+          .[]
           | select(.price != null and .oldPrice != null and (.oldPrice > .price))
           | {
               title: .title,
@@ -31,22 +34,40 @@ jobs:
               originalPrice: .oldPrice,
               currentPrice: .price,
               discountPercent: (((.oldPrice - .price) / .oldPrice) * 100 | floor),
-              url: ("https://www.amazon.es/dp/" + .asin + "?tag=descontoseopo-21")
+              url: ("https://www.amazon.es/dp/" + .asin + "?tag=descontoseopo-21"),
+              created: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
             }
-        ] | sort_by(-.discountPercent)
+        ]
+        | sort_by(-.discountPercent)
         EOF
 
+        # Processar com jq
         jq -f filter.jq raw.json > deals.json
         rm filter.jq raw.json
 
-    - name: Garantir que não está vazio
+    - name: Validar dados
       run: |
         if [ ! -s deals.json ]; then
-          echo "Erro: deals.json ficou vazio"
+          echo "❌ Erro: deals.json está vazio"
           exit 1
         fi
 
-    - name: Commit & Push
+        COUNT=$(jq length deals.json)
+        echo "✅ Encontrados $COUNT produtos com desconto"
+
+        if [ "$COUNT" -eq 0 ]; then
+          echo "⚠️ Nenhum desconto válido encontrado"
+          exit 1
+        fi
+
+    - name: Commit & Push resultados
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "🤖 Atualização automática de descontos Amazon ES"
+        commit_user_name: "GitHub Actions Bot"
+        commit_user_email: "actions@github.com"
+        file_pattern: '*.json'
+
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
         commit_message: "Atualização automática ✅"
