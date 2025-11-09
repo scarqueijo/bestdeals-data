@@ -16,18 +16,15 @@ jobs:
     - name: Instalar jq
       run: sudo apt-get update && sudo apt-get install -y jq
 
-    - name: Obter Promoções da Amazon (Apify)
+    - name: Obter Descontos Reais Amazon.es
       run: |
-        curl -X POST "https://api.apify.com/v2/acts/epctex~amazon-scraper/run-sync?token=$APIFY_TOKEN" \
+        curl -X POST "https://api.apify.com/v2/acts/epctex~amazon-es-discounts/run-sync?token=$APIFY_TOKEN" \
         -H "Content-Type: application/json" \
         -d '{
-              "country": "ES",
-              "maxItems": 60,
-              "includeOffers": true,
-              "dealTypes": ["DEAL_OF_THE_DAY", "LIGHTNING_DEAL"],
-              "minDiscountPercentage": 25
+              "maxItems": 80,
+              "minDiscountPercent": 25
             }' \
-        | jq '.output.results // .results // .data // []' > deals.json
+        | jq '.output // .items // []' > deals.json
       env:
         APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
 
