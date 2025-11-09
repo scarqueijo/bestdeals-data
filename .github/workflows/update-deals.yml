@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  update-deals:
+  update:
     runs-on: ubuntu-latest
 
     steps:
@@ -16,20 +16,35 @@ jobs:
     - name: Instalar jq
       run: sudo apt-get update && sudo apt-get install -y jq
 
-    - name: Buscar Ofertas Amazon.es (Fonte Estável)
+    - name: Obter Ofertas Amazon.es (Dataset Público Apify)
       run: |
-        curl -s "https://api.apify.com/v2/datasets/rxQ3wQJ8ZC3LOJ28F/items?clean=true&format=json" \
-        | jq '[ .[] 
-            | select(.oldPrice != null and .price != null)
-            | {
-                title: .title,
-                asin: .asin,
-                image: .image,
-                originalPrice: .oldPrice,
-                currentPrice: .price,
-                discountPercent: (((.oldPrice - .price) / .oldPrice) * 100 | floor)
-              }
-          ]' > deals.json
+        curl -s "https://api.apify.com/v2/datasets/rxQ3wQJ8ZC3LOJ28F/items?clean=true&format=json" > raw.json
+
+        cat << 'EOF' > filter.jq
+        [
+          .[] 
+          | select(.price != null and .oldPrice != null and (.oldPrice > .price))
+          | {
+              title: .title,
+              asin: .asin,
+              image: .image,
+              originalPrice: .oldPrice,
+              currentPrice: .price,
+              discountPercent: (((.oldPrice - .price) / .oldPrice) * 100 | floor),
+              url: ("https://www.amazon.es/dp/" + .asin + "?tag=descontoseopo-21")
+            }
+        ] | sort_by(-.discountPercent)
+        EOF
+
+        jq -f filter.jq raw.json > deals.json
+        rm filter.jq raw.json
+
+    - name: Garantir que não está vazio
+      run: |
+        if [ ! -s deals.json ]; then
+          echo "Erro: deals.json ficou vazio"
+          exit 1
+        fi
 
     - name: Commit & Push
       uses: stefanzweifel/git-auto-commit-action@v5
