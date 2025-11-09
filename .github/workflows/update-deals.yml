@@ -2,7 +2,7 @@ name: Atualizar Promos Amazon
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/15 * * * *"   # Corre a cada 15 minutos
   workflow_dispatch:
 
 jobs:
@@ -18,10 +18,15 @@ jobs:
 
     - name: Obter Promoções da Amazon (Apify)
       run: |
-        curl -X POST "https://api.apify.com/v2/actor-tasks/apify~amazon-bestsellers/run-sync?token=$APIFY_TOKEN" \
+        curl -X POST "https://api.apify.com/v2/acts/epctex~amazon-scraper/run-sync?token=$APIFY_TOKEN" \
         -H "Content-Type: application/json" \
-        -d '{"maxItems": 40, "country": "ES"}' \
-        | jq '.items' > deals.json
+        -d '{
+              "search": "deal",
+              "country": "ES",
+              "maxItems": 40,
+              "includeOffers": true
+            }' \
+        | jq '.output.results // .results // .data // []' > deals.json
       env:
         APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
 
