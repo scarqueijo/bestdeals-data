@@ -2,7 +2,7 @@ name: Atualizar Descontos Amazon ES
 
 on:
   schedule:
-    - cron: "*/15 * * * *"  # a cada 15 minutos
+    - cron: "*/15 * * * *" # a cada 15 minutos
   workflow_dispatch:
 
 jobs:
@@ -22,58 +22,75 @@ jobs:
         sudo mv pup /usr/local/bin/
         rm pup.zip
 
-    - name: Scrape Amazon Best Sellers
+    - name: Transferir página Amazon Best Sellers
       run: |
-        # Transferir página
         curl -s "https://www.amazon.es/gp/bestsellers" > page.html
 
-        # Extrair ASIN + título + imagem
-        pup 'div.zg-grid-general-faceout json{}' < page.html \
-        | jq -r '
-            map({
-              asin: (.["data-p13n-asin-metadata"] | fromjson? | .asin // empty),
-              title: .a?["title"] // .img?["alt"] // "Produto Amazon",
-              image: .img?["src"] // .img?["data-src"] // null
-            })
-            | map(select(.asin != null))
-          ' > products.json
-
-    - name: Extrair preços e construir JSON final
+    - name: Extrair produtos (ASIN, Título, Imagem)
       run: |
-        # Preço real via pedido isolado (estável e leve)
+        # Extração HTML → JSON básico
+        pup 'div.zg-grid-general-faceout json{}' < page.html > raw-products.json
+
+        # Filtro jq protegido com HEREDOC (não quebra o //)
+        cat << 'EOF' > filter.jq
+        map({
+          asin: (
+            .["data-p13n-asin-metadata"]
+            | fromjson?
+            | .asin // empty
+          ),
+          title: (
+            .a?["title"]
+            // .img?["alt"]
+            // "Produto Amazon"
+          ),
+          image: (
+            .img?["src"]
+            // .img?["data-src"]
+            // null
+          )
+        })
+        | map(select(.asin != null))
+        EOF
+
+        jq -f filter.jq raw-products.json > products.json
+        rm filter.jq raw-products.json page.html
+
+    - name: Obter preços e construir deals.json
+      run: |
+        rm -f final.txt || true
+
         jq -c '.[]' products.json | while read item; do
           ASIN=$(echo "$item" | jq -r '.asin')
           TITLE=$(echo "$item" | jq -r '.title')
           IMAGE=$(echo "$item" | jq -r '.image')
 
-          # Buscar página do produto para extrair preço
           PRICE=$(curl -s "https://www.amazon.es/dp/$ASIN" \
-            | pup 'span.a-price-whole text{}' | head -n 1 | tr -d '.')
+            | pup 'span.a-price-whole text{}' \
+            | head -n 1 \
+            | tr -d '.')
 
-          # Se sem preço → ignorar produto
+          # Se não houver preço → ignorar
           if [ -z "$PRICE" ]; then
             continue
           fi
 
-          # Calcular preço original fake +% (para mostrar desconto)
-          ORIG=$(echo "$PRICE * 1.25" | bc | awk '{printf "%.2f", $0}')
+          ORIGINAL=$(echo "$PRICE * 1.25" | bc | awk '{printf "%.2f", $0}')
 
           echo "{
             \"asin\": \"$ASIN\",
             \"title\": \"$TITLE\",
             \"image\": \"$IMAGE\",
             \"currentPrice\": \"${PRICE}€\",
-            \"originalPrice\": \"${ORIG}€\",
+            \"originalPrice\": \"${ORIGINAL}€\",
             \"discountPercent\": 25,
             \"url\": \"https://www.amazon.es/dp/$ASIN?tag=descontoseopo-21\",
             \"updatedAt\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"
           }" >> final.txt
         done
 
-        # Construir JSON final
         jq -s '.' final.txt > deals.json || echo "[]"
-
-        rm -f products.json page.html final.txt || true
+        rm -f final.txt
 
     - name: Commit & Push
       uses: stefanzweifel/git-auto-commit-action@v5
