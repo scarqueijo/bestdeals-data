@@ -2,55 +2,64 @@ name: Atualizar Descontos Amazon ES
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/15 * * * *"   # Corre a cada 15 min
   workflow_dispatch:
 
 jobs:
   update-deals:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-    - name: Checkout
+    - name: Checkout repositório
       uses: actions/checkout@v4
 
     - name: Instalar dependências
-      run: sudo apt-get update && sudo apt-get install -y jq curl bc
-
-    - name: Obter ASINs da Amazon Best Sellers
       run: |
-        curl -s "https://www.amazon.es/gp/bestsellers" \
+        sudo apt-get update
+        sudo apt-get install -y jq curl bc
+
+    - name: Obter lista de ASINs (Amazon Best Sellers)
+      run: |
+        # user-agent para evitar página vazia / bloqueio
+        curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+          "https://www.amazon.es/gp/bestsellers" \
         | grep -oE "/dp/[A-Z0-9]{10}" \
         | sed -E 's/.*dp\/([A-Z0-9]{10}).*/\1/' \
         | sort -u \
         | head -n 50 \
         > asins.txt
 
-        echo "✅ ASINs extraídos:"
+        echo "✅ ASINs encontrados:"
         cat asins.txt
 
-    - name: Resolver preços via Keepa Mirror (sem API Key)
+    - name: Resolver preços via Keepa Mirror (sem API key)
       run: |
         echo "[" > deals.json
         first=true
+
         while read asin; do
           data=$(curl -s "https://keepa.lkn.sh/product/ES/${asin}")
 
-          current=$(echo "$data" | jq '.buyBoxSellerPrice')
-          original=$(echo "$data" | jq '.buyBoxPrice')
           title=$(echo "$data" | jq -r '.title')
           image=$(echo "$data" | jq -r '.images[0]')
+          original=$(echo "$data" | jq '.buyBoxPrice')
+          current=$(echo "$data" | jq '.buyBoxSellerPrice')
 
-          if [ "$current" != "null" ] && [ "$original" != "null" ] && echo "$original > $current" | bc -l >/dev/null 2>&1; then
+          # Garantir números e desconto real
+          if [ "$original" != "null" ] && [ "$current" != "null" ] && echo "$original > $current" | bc -l >/dev/null 2>&1; then
             discount=$(echo "(($original - $current) / $original) * 100" | bc -l | awk '{print int($1)}')
 
+            # Inserir vírgula corretamente
             if [ $first = true ]; then first=false; else echo "," >> deals.json; fi
 
             echo "{\"title\":\"$title\",\"asin\":\"$asin\",\"image\":\"$image\",\"originalPrice\":$original,\"currentPrice\":$current,\"discountPercent\":$discount,\"url\":\"https://www.amazon.es/dp/$asin?tag=descontoseopo-21\"}" >> deals.json
           fi
         done < asins.txt
+
         echo "]" >> deals.json
 
-        echo "✅ Produtos processados:"
+        echo "✅ Total de promoções:"
         jq length deals.json
 
     - name: Commit & Push resultados
