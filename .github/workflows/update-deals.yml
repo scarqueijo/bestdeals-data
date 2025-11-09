@@ -10,20 +10,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout código
+    - name: Checkout
       uses: actions/checkout@v4
 
     - name: Instalar jq
       run: sudo apt-get update && sudo apt-get install -y jq
 
-    - name: Buscar Descontos Amazon.es (Chollometro)
+    - name: Buscar Descontos Amazon.es (Pepper API Mirror)
       run: |
-        curl -s "https://www.chollometro.com/rest_api/v3/deals?page=1&per_page=100&search=amazon.es" > raw.json
+        curl -s "https://api.pepper.com/v1/deals?domains=amazon.es&limit=100" > raw.json
 
         cat << 'EOF' > filter.jq
         [
           .data[]
-          | select(.price_old != null and .price != null)
+          | select(.price.old != null and .price.current != null)
           | {
               title: .title,
               asin: (
@@ -31,9 +31,9 @@ jobs:
                 catch "UNKNOWN"
               ),
               image: .thumbnail,
-              originalPrice: .price_old,
-              currentPrice: .price,
-              discountPercent: (((.price_old - .price) / .price_old) * 100 | floor)
+              originalPrice: .price.old,
+              currentPrice: .price.current,
+              discountPercent: (((.price.old - .price.current) / .price.old) * 100 | floor)
             }
         ]
         EOF
@@ -41,7 +41,7 @@ jobs:
         jq -f filter.jq raw.json > deals.json
         rm filter.jq
 
-    - name: Commit & Push resultados
+    - name: Commit & Push
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
         commit_message: "Atualização automática ✅"
