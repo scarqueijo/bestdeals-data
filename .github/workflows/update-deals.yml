@@ -1,21 +1,16 @@
-name: Atualizar Descontos Amazon ES
+name: Atualizar Descontos Amazon ES (PA-API Oficial)
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/15 * * * *"   # Atualiza a cada 15 minutos
   workflow_dispatch:
 
 permissions:
   contents: write
 
-concurrency:
-  group: update-deals
-  cancel-in-progress: true
-
 jobs:
-  update-deals:
+  fetch-deals:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -23,64 +18,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Instalar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
       - name: Instalar dependências
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq curl
+        run: npm install amazon-paapi@1.0.7
 
-      - name: Obter deals da API Pepper (Chollometro → Amazon ES)
-        run: |
-          set -euo pipefail
+      - name: Executar script de recolha
+        run: node fetch-deals.js
+        env:
+          PAAPI_ACCESS_KEY: ${{ AKPAK4QL151762723824 }}
+          PAAPI_SECRET_KEY: ${{ x2AFI7Z08/PlInoC4/2irL742O71Z2uo0YZ5HhgU }}
+          PAAPI_PARTNER_TAG: ${{ descontoseopo-21 }}
 
-          curl -fsSL --retry 3 --max-time 30 \
-            -H "User-Agent: bestdeals-bot/1.0" \
-            "https://api.pepper.com/v1/deals?domain=chollometro.com&search=amazon.es&limit=100" \
-            > raw.json
-
-          jq '
-            .data[]?
-            | select(.price_previous != null and .price != null and (.price_previous > .price))
-            | {
-                title: .title,
-                asin: (
-                  try (.url | match("dp/([A-Z0-9]{10})") | .captures[0].string)
-                  catch "UNKNOWN"
-                ),
-                image: .thumbnail,
-                originalPrice: (.price_previous | tostring + "€"),
-                currentPrice: (.price | tostring + "€"),
-                discountPercent: (
-                  if (.price_previous // 0) > 0 then
-                    (((.price_previous - .price) / .price_previous) * 100 | floor)
-                  else 0 end
-                ),
-                url: .url,
-                source: "pepper-api",
-                fetchedAt: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
-              }
-            | select(.asin != "UNKNOWN")
-            | sort_by(-.discountPercent)
-          ' raw.json > deals.json
-
-          if [ ! -s deals.json ] || [ "$(jq 'length' deals.json)" -eq 0 ]; then
-            echo "✅ Nenhum desconto válido nesta execução. Workflow neutro."
-            exit 78
-          fi
-
-          echo "✅ Encontrados $(jq 'length' deals.json) produtos com desconto."
-
-      - name: Commit & Push (sem conflitos)
+      - name: Commit & Push resultados
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git pull --rebase origin main || true
-
           git add deals.json
-          if git diff --cached --quiet; then
-            echo "ℹ️ Sem alterações."
-          else
-            git commit -m "🔥 Atualização automática Amazon ES - $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            git push origin main
-            echo "✅ Push efetuado."
-          fi
+          git commit -m "🤖 Atualização automática Amazon ES via PA-API" || true
+          git push origin HEAD:main || true
