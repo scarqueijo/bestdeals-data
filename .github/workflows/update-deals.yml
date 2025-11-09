@@ -2,10 +2,9 @@ name: Atualizar Descontos Amazon ES
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # a cada 15 minutos
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
-# necessário para o bot poder escrever no repositório
 permissions:
   contents: write
 
@@ -22,7 +21,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          persist-credentials: true
           fetch-depth: 0
 
       - name: Instalar dependências
@@ -30,79 +28,59 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq curl
 
-      - name: Obter deals do Chollometro (amazon.es)
+      - name: Obter deals da API Pepper (Chollometro → Amazon ES)
         run: |
           set -euo pipefail
 
-          # 1) Buscar página com timeout e reintentos
           curl -fsSL --retry 3 --max-time 30 \
             -H "User-Agent: bestdeals-bot/1.0" \
-            "https://www.chollometro.com/rest_api/v3/deals?page=1&per_page=100&search=amazon.es" \
+            "https://api.pepper.com/v1/deals?domain=chollometro.com&search=amazon.es&limit=100" \
             > raw.json
 
-          # 2) Validar JSON bruto (falha cedo se vier HTML/erro)
-          jq -e . raw.json >/dev/null
-
-          # 3) Filtro jq robusto (heredoc QUOTED para não expandir no shell)
-          cat <<'JQ' > filter.jq
-          [
-            (.data // [])[]? 
-            | select(.price_old != null and .price != null and (.price_old > .price))
+          jq '
+            .data[]?
+            | select(.price_previous != null and .price != null and (.price_previous > .price))
             | {
-                title: (.title // "Produto Amazon"),
+                title: .title,
                 asin: (
-                  try ((.url // "") | match("dp/([A-Z0-9]{10})") | .captures[0].string)
-                  catch (
-                    try ((.url // "") | match("/product/([A-Z0-9]{10})") | .captures[0].string)
-                    catch "UNKNOWN"
-                  )
+                  try (.url | match("dp/([A-Z0-9]{10})") | .captures[0].string)
+                  catch "UNKNOWN"
                 ),
-                image: (.thumbnail // null),
-                originalPrice: (.price_old // 0),
-                currentPrice: (.price // 0),
+                image: .thumbnail,
+                originalPrice: (.price_previous | tostring + "€"),
+                currentPrice: (.price | tostring + "€"),
                 discountPercent: (
-                  if (.price_old // 0) > 0 then
-                    (((.price_old - .price) / .price_old) * 100 | floor)
+                  if (.price_previous // 0) > 0 then
+                    (((.price_previous - .price) / .price_previous) * 100 | floor)
                   else 0 end
                 ),
-                url: (.url // null),
-                source: "chollometro",
+                url: .url,
+                source: "pepper-api",
                 fetchedAt: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
               }
             | select(.asin != "UNKNOWN")
-          ]
-          | sort_by(-.discountPercent)
-          JQ
+            | sort_by(-.discountPercent)
+          ' raw.json > deals.json
 
-          # 4) Produzir deals.json em linha única (-c) para evitar “um item por linha”
-          jq -c -f filter.jq raw.json > deals.json
-
-          # 5) Sanidade: se vazio, sair neutro para não falhar o workflow
           if [ ! -s deals.json ] || [ "$(jq 'length' deals.json)" -eq 0 ]; then
-            echo "✅ Sem descontos válidos nesta execução."
-            exit 78   # neutral
+            echo "✅ Nenhum desconto válido nesta execução. Workflow neutro."
+            exit 78
           fi
 
           echo "✅ Encontrados $(jq 'length' deals.json) produtos com desconto."
 
-      - name: Commit & Push (com rebase para evitar non-fast-forward)
-        if: success() || failure() && steps.Obter_deals_do_Chollometro__amazon_es_.outcome != 'failure'
+      - name: Commit & Push (sem conflitos)
         run: |
-          set -e
-
-          # Definir identidade do bot
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Atualizar do remoto para evitar rejeições
-          git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)" || true
+          git pull --rebase origin main || true
 
-          # Só commita se houver alterações
           git add deals.json
-          if ! git diff --cached --quiet; then
-            git commit -m "🤖 Atualização automática Amazon ES - $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            git push origin HEAD
-            echo "✅ Push efetuado."
+          if git diff --cached --quiet; then
+            echo "ℹ️ Sem alterações."
           else
-            echo "ℹ️ Sem alterações para commit."
+            git commit -m "🔥 Atualização automática Amazon ES - $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            git push origin main
+            echo "✅ Push efetuado."
           fi
