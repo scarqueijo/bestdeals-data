@@ -16,13 +16,13 @@ jobs:
     - name: Instalar jq
       run: sudo apt-get update && sudo apt-get install -y jq
 
-    - name: Buscar Descontos Amazon.es (Chollometro - Estável)
+    - name: Buscar Descontos Amazon.es (Chollometro)
       run: |
         curl -s "https://www.chollometro.com/rest_api/v3/deals?page=1&per_page=100&search=amazon.es" > raw.json
 
-        cat << 'EOF' | jq -f - raw.json > deals.json
+        cat << 'EOF' > filter.jq
         [
-          .data[] 
+          .data[]
           | select(.price_old != null and .price != null)
           | {
               title: .title,
@@ -37,6 +37,9 @@ jobs:
             }
         ]
         EOF
+
+        jq -f filter.jq raw.json > deals.json
+        rm filter.jq
 
     - name: Commit & Push resultados
       uses: stefanzweifel/git-auto-commit-action@v5
