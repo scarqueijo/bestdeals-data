@@ -13,6 +13,9 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    - name: Instalar jq
+      run: sudo apt-get update && sudo apt-get install -y jq
+
     - name: Obter Promoções da Amazon (Apify)
       run: |
         curl -X POST "https://api.apify.com/v2/acts/zuzka~amazon-seller-scraper/run-sync?token=$APIFY_TOKEN" \
@@ -29,4 +32,3 @@ jobs:
         git add deals.json
         git commit -m "Atualização automática $(date)" || echo "Sem alterações"
         git push
-
