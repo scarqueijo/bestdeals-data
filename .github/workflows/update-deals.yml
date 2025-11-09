@@ -2,8 +2,16 @@ name: Atualizar Descontos Amazon ES
 
 on:
   schedule:
-    - cron: "*/15 * * * *" # Atualiza a cada 15 minutos
+    - cron: "*/15 * * * *"   # a cada 15 minutos
   workflow_dispatch:
+
+# necessário para o bot poder escrever no repositório
+permissions:
+  contents: write
+
+concurrency:
+  group: update-deals
+  cancel-in-progress: true
 
 jobs:
   update-deals:
@@ -11,48 +19,90 @@ jobs:
     timeout-minutes: 10
 
     steps:
-    - name: Checkout repositório
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
-    - name: Instalar dependências
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y jq curl
+      - name: Instalar dependências
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl
 
-    - name: Buscar descontos do Chollometro (Amazon.es)
-      run: |
-        curl -s "https://www.chollometro.com/rest_api/v3/deals?page=1&per_page=80&search=amazon.es" > raw.json
+      - name: Obter deals do Chollometro (amazon.es)
+        run: |
+          set -euo pipefail
 
-        # Criar products.json limpo
-        jq '
-          .data[]
-          | select(.price_old != null and .price != null and (.price_old > .price))
-          | {
-              title: .title,
-              url: .url,
-              originalPrice: (.price_old | tostring + "€"),
-              currentPrice: (.price | tostring + "€"),
-              discountPercent: (((.price_old - .price) / .price_old) * 100 | floor),
-              asin: (
-                (.url | capture("dp/(?<id>[A-Z0-9]{10})")?.id) // "UNKNOWN"
-              ),
-              image: .thumbnail,
-              updatedAt: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
-            }
-          | select(.asin != "UNKNOWN")
-        ' raw.json > products.json
+          # 1) Buscar página com timeout e reintentos
+          curl -fsSL --retry 3 --max-time 30 \
+            -H "User-Agent: bestdeals-bot/1.0" \
+            "https://www.chollometro.com/rest_api/v3/deals?page=1&per_page=100&search=amazon.es" \
+            > raw.json
 
-    - name: Remover eventos duplicados e ordenar por maior desconto
-      run: |
-        jq 'sort_by(-.discountPercent)' products.json > deals.json
+          # 2) Validar JSON bruto (falha cedo se vier HTML/erro)
+          jq -e . raw.json >/dev/null
 
-    - name: Commit & Push sem conflitos
-      run: |
-        git config --local user.email "github-actions[bot]@users.noreply.github.com"
-        git config --local user.name "github-actions[bot]"
+          # 3) Filtro jq robusto (heredoc QUOTED para não expandir no shell)
+          cat <<'JQ' > filter.jq
+          [
+            (.data // [])[]? 
+            | select(.price_old != null and .price != null and (.price_old > .price))
+            | {
+                title: (.title // "Produto Amazon"),
+                asin: (
+                  try ((.url // "") | match("dp/([A-Z0-9]{10})") | .captures[0].string)
+                  catch (
+                    try ((.url // "") | match("/product/([A-Z0-9]{10})") | .captures[0].string)
+                    catch "UNKNOWN"
+                  )
+                ),
+                image: (.thumbnail // null),
+                originalPrice: (.price_old // 0),
+                currentPrice: (.price // 0),
+                discountPercent: (
+                  if (.price_old // 0) > 0 then
+                    (((.price_old - .price) / .price_old) * 100 | floor)
+                  else 0 end
+                ),
+                url: (.url // null),
+                source: "chollometro",
+                fetchedAt: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
+              }
+            | select(.asin != "UNKNOWN")
+          ]
+          | sort_by(-.discountPercent)
+          JQ
 
-        git pull --rebase origin main || true
+          # 4) Produzir deals.json em linha única (-c) para evitar “um item por linha”
+          jq -c -f filter.jq raw.json > deals.json
 
-        git add deals.json products.json
-        git commit -m "🔥 Atualização automática Amazon ES" || true
-        git push origin HEAD:main || true
+          # 5) Sanidade: se vazio, sair neutro para não falhar o workflow
+          if [ ! -s deals.json ] || [ "$(jq 'length' deals.json)" -eq 0 ]; then
+            echo "✅ Sem descontos válidos nesta execução."
+            exit 78   # neutral
+          fi
+
+          echo "✅ Encontrados $(jq 'length' deals.json) produtos com desconto."
+
+      - name: Commit & Push (com rebase para evitar non-fast-forward)
+        if: success() || failure() && steps.Obter_deals_do_Chollometro__amazon_es_.outcome != 'failure'
+        run: |
+          set -e
+
+          # Definir identidade do bot
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Atualizar do remoto para evitar rejeições
+          git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)" || true
+
+          # Só commita se houver alterações
+          git add deals.json
+          if ! git diff --cached --quiet; then
+            git commit -m "🤖 Atualização automática Amazon ES - $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            git push origin HEAD
+            echo "✅ Push efetuado."
+          else
+            echo "ℹ️ Sem alterações para commit."
+          fi
