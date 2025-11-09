@@ -16,30 +16,20 @@ jobs:
     - name: Instalar jq
       run: sudo apt-get update && sudo apt-get install -y jq
 
-    - name: Buscar Descontos Amazon.es (Pepper API Mirror)
+    - name: Buscar Ofertas Amazon.es (Fonte Estável)
       run: |
-        curl -s "https://api.pepper.com/v1/deals?domains=amazon.es&limit=100" > raw.json
-
-        cat << 'EOF' > filter.jq
-        [
-          .data[]
-          | select(.price.old != null and .price.current != null)
-          | {
-              title: .title,
-              asin: (
-                try (.url | match("dp/([A-Z0-9]{10})").captures[0].string)
-                catch "UNKNOWN"
-              ),
-              image: .thumbnail,
-              originalPrice: .price.old,
-              currentPrice: .price.current,
-              discountPercent: (((.price.old - .price.current) / .price.old) * 100 | floor)
-            }
-        ]
-        EOF
-
-        jq -f filter.jq raw.json > deals.json
-        rm filter.jq
+        curl -s "https://api.apify.com/v2/datasets/rxQ3wQJ8ZC3LOJ28F/items?clean=true&format=json" \
+        | jq '[ .[] 
+            | select(.oldPrice != null and .price != null)
+            | {
+                title: .title,
+                asin: .asin,
+                image: .image,
+                originalPrice: .oldPrice,
+                currentPrice: .price,
+                discountPercent: (((.oldPrice - .price) / .oldPrice) * 100 | floor)
+              }
+          ]' > deals.json
 
     - name: Commit & Push
       uses: stefanzweifel/git-auto-commit-action@v5
