@@ -10,48 +10,44 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout código
+    - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Instalar jq
-      run: sudo apt-get update && sudo apt-get install -y jq
+    - name: Instalar dependências
+      run: sudo apt-get update && sudo apt-get install -y jq curl htmlq
 
-    - name: Buscar Ofertas Amazon.es (GoldBox Estável Oficial)
+    - name: Obter ASINs da Amazon Best Sellers
       run: |
-        curl -s "https://api.apify.com/v2/actor-tasks/apify~amazon-goldbox-crawler/runs/last/dataset/items?clean=true&format=json" > raw.json
+        curl -s "https://www.amazon.es/gp/bestsellers" \
+        | htmlq a --attribute href \
+        | grep "/dp/" \
+        | sed -E 's/.*dp\/([A-Z0-9]{10}).*/\1/' \
+        | sort -u \
+        | head -n 50 \
+        > asins.txt
 
-        cat << 'EOF' > filter.jq
-        [
-          .[]
-          | select(.asin != null and .currentPrice != null and .beforePrice != null and (.beforePrice > .currentPrice))
-          | {
-              title: .title,
-              asin: .asin,
-              image: .image,
-              originalPrice: .beforePrice,
-              currentPrice: .currentPrice,
-              discountPercent: (((.beforePrice - .currentPrice) / .beforePrice) * 100 | floor),
-              url: ("https://www.amazon.es/dp/" + .asin + "?tag=descontoseopo-21"),
-              created: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
-            }
-        ]
-        | sort_by(-.discountPercent)
-        EOF
-
-        jq -f filter.jq raw.json > deals.json
-        rm filter.jq raw.json
-
-    - name: Validar dados
+    - name: Resolver preços via Keepa Mirror
       run: |
-        COUNT=$(jq length deals.json)
-        echo "✅ Encontrados $COUNT produtos com desconto"
-        if [ "$COUNT" -eq 0 ]; then
-          echo "⚠️ Nenhum desconto válido encontrado"
-          exit 1
-        fi
+        echo "[" > deals.json
+        first=true
+        while read asin; do
+          data=$(curl -s "https://keepa.lkn.sh/product/ES/${asin}")
+          current=$(echo "$data" | jq '.buyBoxSellerPrice')
+          original=$(echo "$data" | jq '.buyBoxPrice')
+          title=$(echo "$data" | jq -r '.title')
+          image=$(echo "$data" | jq -r '.images[0]')
+
+          if [ "$current" != "null" ] && [ "$original" != "null" ] && (( $(echo "$original > $current" | bc -l) )); then
+            discount=$(echo "(($original - $current) / $original) * 100" | bc -l | awk '{print int($1)}')
+            if [ $first = true ]; then first=false; else echo "," >> deals.json; fi
+            echo "{\"title\":\"$title\",\"asin\":\"$asin\",\"image\":\"$image\",\"originalPrice\":$original,\"currentPrice\":$current,\"discountPercent\":$discount,\"url\":\"https://www.amazon.es/dp/$asin?tag=descontoseopo-21\"}" >> deals.json
+          fi
+        done < asins.txt
+        echo "]" >> deals.json
 
     - name: Commit & Push resultados
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
-        commit_message: "🤖 Atualização automática de descontos Amazon ES"
+        commit_message: "🔥 Atualização automática Amazon ES (Best Sellers)"
         file_pattern: '*.json'
+
