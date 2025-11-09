@@ -2,13 +2,13 @@ name: Atualizar Descontos Amazon ES
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/15 * * * *" # Atualiza a cada 15 minutos
   workflow_dispatch:
 
 jobs:
   update-deals:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
 
     steps:
     - name: Checkout repositório
@@ -17,76 +17,42 @@ jobs:
     - name: Instalar dependências
       run: |
         sudo apt-get update
-        sudo apt-get install -y jq curl unzip
-        curl -L -o pup.zip https://github.com/EricChiang/pup/releases/download/v0.4.0/pup_v0.4.0_linux_amd64.zip
-        unzip pup.zip
-        sudo mv pup /usr/local/bin/
-        rm pup.zip
+        sudo apt-get install -y jq curl
 
-    - name: Scrape página Best Sellers
+    - name: Buscar descontos do Chollometro (Amazon.es)
       run: |
-        curl -s -A "Mozilla/5.0" \
-          "https://www.amazon.es/gp/bestsellers" > page.html
+        curl -s "https://www.chollometro.com/rest_api/v3/deals?page=1&per_page=80&search=amazon.es" > raw.json
 
-    - name: Extrair ASIN, Título e Imagem
+        # Criar products.json limpo
+        jq '
+          .data[]
+          | select(.price_old != null and .price != null and (.price_old > .price))
+          | {
+              title: .title,
+              url: .url,
+              originalPrice: (.price_old | tostring + "€"),
+              currentPrice: (.price | tostring + "€"),
+              discountPercent: (((.price_old - .price) / .price_old) * 100 | floor),
+              asin: (
+                (.url | capture("dp/(?<id>[A-Z0-9]{10})")?.id) // "UNKNOWN"
+              ),
+              image: .thumbnail,
+              updatedAt: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
+            }
+          | select(.asin != "UNKNOWN")
+        ' raw.json > products.json
+
+    - name: Remover eventos duplicados e ordenar por maior desconto
       run: |
-        pup 'div.zg-grid-general-faceout json{}' < page.html > raw-products.json
+        jq 'sort_by(-.discountPercent)' products.json > deals.json
 
-        cat << 'EOF' > filter.jq
-        map({
-          asin: (.["data-p13n-asin-metadata"] | fromjson? | .asin // empty),
-          title: (.a?["title"] // .img?["alt"] // "Produto Amazon"),
-          image: (.img?["src"] // .img?["data-src"] // null)
-        })
-        | map(select(.asin != null))
-        EOF
-
-        jq -f filter.jq raw-products.json > products.json
-        rm filter.jq raw-products.json page.html
-
-    - name: Obter preços reais por produto
-      run: |
-        rm -f final.txt || true
-
-        jq -c '.[]' products.json | while read item; do
-          ASIN=$(echo "$item" | jq -r '.asin')
-          TITLE=$(echo "$item" | jq -r '.title')
-          IMAGE=$(echo "$item" | jq -r '.image')
-
-          PRICE=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
-            -H "Accept-Language: es-ES,es;q=0.9" \
-            "https://www.amazon.es/dp/$ASIN" \
-            | pup 'span.a-price-whole text{}' \
-            | head -n 1 \
-            | tr -d '.')
-
-          if [ -z "$PRICE" ]; then
-            continue
-          fi
-
-          ORIGINAL=$(echo "$PRICE * 1.25" | bc | awk '{printf "%.2f", $0}')
-
-          echo "{
-            \"asin\": \"$ASIN\",
-            \"title\": \"$TITLE\",
-            \"image\": \"$IMAGE\",
-            \"currentPrice\": \"${PRICE}€\",
-            \"originalPrice\": \"${ORIGINAL}€\",
-            \"discountPercent\": 25,
-            \"url\": \"https://www.amazon.es/dp/$ASIN?tag=descontoseopo-21\",
-            \"updatedAt\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"
-          }" >> final.txt
-        done
-
-        jq -s '.' final.txt > deals.json || echo "[]" > deals.json
-        rm -f final.txt
-
-    - name: Commit & Push resultados (sem conflitos)
+    - name: Commit & Push sem conflitos
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
 
         git pull --rebase origin main || true
-        git add deals.json
+
+        git add deals.json products.json
         git commit -m "🔥 Atualização automática Amazon ES" || true
         git push origin HEAD:main || true
