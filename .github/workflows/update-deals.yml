@@ -2,19 +2,19 @@ name: Atualizar Descontos Amazon ES
 
 on:
   schedule:
-    - cron: "*/15 * * * *" # Executa a cada 15 minutos
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 jobs:
   update-deals:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
     - name: Checkout repositório
       uses: actions/checkout@v4
 
-    - name: Instalar dependências necessárias
+    - name: Instalar dependências
       run: |
         sudo apt-get update
         sudo apt-get install -y jq curl unzip
@@ -23,11 +23,12 @@ jobs:
         sudo mv pup /usr/local/bin/
         rm pup.zip
 
-    - name: Transferir página Amazon Best Sellers
+    - name: Scrape página Best Sellers
       run: |
-        curl -s "https://www.amazon.es/gp/bestsellers" > page.html
+        curl -s -A "Mozilla/5.0" \
+          "https://www.amazon.es/gp/bestsellers" > page.html
 
-    - name: Extrair ASIN / Título / Imagem
+    - name: Extrair ASIN, Título e Imagem
       run: |
         pup 'div.zg-grid-general-faceout json{}' < page.html > raw-products.json
 
@@ -43,7 +44,7 @@ jobs:
         jq -f filter.jq raw-products.json > products.json
         rm filter.jq raw-products.json page.html
 
-    - name: Obter preços e gerar deals.json final
+    - name: Obter preços reais por produto
       run: |
         rm -f final.txt || true
 
@@ -52,7 +53,9 @@ jobs:
           TITLE=$(echo "$item" | jq -r '.title')
           IMAGE=$(echo "$item" | jq -r '.image')
 
-          PRICE=$(curl -s "https://www.amazon.es/dp/$ASIN" \
+          PRICE=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+            -H "Accept-Language: es-ES,es;q=0.9" \
+            "https://www.amazon.es/dp/$ASIN" \
             | pup 'span.a-price-whole text{}' \
             | head -n 1 \
             | tr -d '.')
@@ -78,13 +81,12 @@ jobs:
         jq -s '.' final.txt > deals.json || echo "[]" > deals.json
         rm -f final.txt
 
-    - name: Commit & Push resultados corrigido (sem conflitos)
+    - name: Commit & Push resultados (sem conflitos)
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
 
         git pull --rebase origin main || true
-
         git add deals.json
         git commit -m "🔥 Atualização automática Amazon ES" || true
         git push origin HEAD:main || true
