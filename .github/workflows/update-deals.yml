@@ -1,8 +1,8 @@
-name: Atualizar Promos Amazon
+name: Atualizar Descontos Amazon ES
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # Corre a cada 15 minutos
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -16,17 +16,17 @@ jobs:
     - name: Instalar jq
       run: sudo apt-get update && sudo apt-get install -y jq
 
-    - name: Obter Descontos Reais Amazon.es
+    - name: Buscar Descontos Amazon
       run: |
-        curl -X POST "https://api.apify.com/v2/acts/epctex~amazon-es-discounts/run-sync?token=$APIFY_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{
-              "maxItems": 80,
-              "minDiscountPercent": 25
-            }' \
-        | jq '.output // .items // []' > deals.json
-      env:
-        APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+        curl -s "https://www.chollometro.com/rest_api/v3/deals?page=1&per_page=50&search=amazon.es" \
+        | jq '[.data[] | select(.price_old != null and .price != null) | {
+            title: .title,
+            asin: (.url | capture("dp/(?<asin>[A-Z0-9]{10})")?.asin // "UNKNOWN"),
+            image: .thumbnail,
+            originalPrice: .price_old,
+            currentPrice: .price,
+            discountPercent: ((.price_old - .price) / .price_old * 100 | floor)
+          }]' > deals.json
 
     - name: Commit & Push
       uses: stefanzweifel/git-auto-commit-action@v5
