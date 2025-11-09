@@ -2,7 +2,7 @@ name: Atualizar Descontos Amazon ES
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/15 * * * *"  # a cada 15 minutos
   workflow_dispatch:
 
 jobs:
@@ -10,58 +10,73 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout
+    - name: Checkout repositório
       uses: actions/checkout@v4
 
     - name: Instalar dependências
       run: |
         sudo apt-get update
-        sudo apt-get install -y jq curl
-        curl -fsSL https://github.com/ericchiang/pup/releases/download/v0.4.0/pup_0.4.0_linux_amd64.tar.gz \
-        | tar xz && sudo mv pup /usr/local/bin/
+        sudo apt-get install -y jq curl unzip
+        curl -L -o pup.zip https://github.com/EricChiang/pup/releases/download/v0.4.0/pup_v0.4.0_linux_amd64.zip
+        unzip pup.zip
+        sudo mv pup /usr/local/bin/
+        rm pup.zip
 
-    - name: Extrair produtos Best Sellers (Amazon.es)
+    - name: Scrape Amazon Best Sellers
       run: |
+        # Transferir página
         curl -s "https://www.amazon.es/gp/bestsellers" > page.html
 
-        pup 'div.p13n-grid-row div.zg-grid-general-faceout json{}' < page.html \
+        # Extrair ASIN + título + imagem
+        pup 'div.zg-grid-general-faceout json{}' < page.html \
         | jq -r '
-          map({
-            title: (.["data-p13n-asin-metadata"].asin | if . != null then . else "UNKNOWN" end) as $asin
-            | {
-                asin: $asin,
-                url: ("https://www.amazon.es/dp/" + $asin),
-                title: .title // "Produto Amazon",
-                image: (.img src // .img["data-src"] // null),
-                currentPrice: (.span | .. | strings | capture("([0-9]+[,\\.]?[0-9]*)")?.string) // null
-              }
-          })
-          | map(select(.asin != "UNKNOWN"))
-        ' > deals-raw.json
+            map({
+              asin: (.["data-p13n-asin-metadata"] | fromjson? | .asin // empty),
+              title: .a?["title"] // .img?["alt"] // "Produto Amazon",
+              image: .img?["src"] // .img?["data-src"] // null
+            })
+            | map(select(.asin != null))
+          ' > products.json
 
-    - name: Limpar & formatar preços e calcular desconto
+    - name: Extrair preços e construir JSON final
       run: |
-        jq '
-          map(
-            .originalPrice = (.currentPrice | tonumber?*1.25 | tostring + "€") |
-            .currentPrice = (.currentPrice + "€") |
-            .discountPercent = 25 |
-            .created = (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
-          )
-        ' deals-raw.json > deals.json
+        # Preço real via pedido isolado (estável e leve)
+        jq -c '.[]' products.json | while read item; do
+          ASIN=$(echo "$item" | jq -r '.asin')
+          TITLE=$(echo "$item" | jq -r '.title')
+          IMAGE=$(echo "$item" | jq -r '.image')
 
-        rm deals-raw.json page.html || true
+          # Buscar página do produto para extrair preço
+          PRICE=$(curl -s "https://www.amazon.es/dp/$ASIN" \
+            | pup 'span.a-price-whole text{}' | head -n 1 | tr -d '.')
 
-    - name: Validar
-      run: |
-        COUNT=$(jq length deals.json)
-        echo "✅ Encontrados $COUNT produtos"
-        if [ "$COUNT" -eq 0 ]; then
-          echo "⚠️ Nenhum produto extraído — mas workflow não falha para continuar o site"
-        fi
+          # Se sem preço → ignorar produto
+          if [ -z "$PRICE" ]; then
+            continue
+          fi
+
+          # Calcular preço original fake +% (para mostrar desconto)
+          ORIG=$(echo "$PRICE * 1.25" | bc | awk '{printf "%.2f", $0}')
+
+          echo "{
+            \"asin\": \"$ASIN\",
+            \"title\": \"$TITLE\",
+            \"image\": \"$IMAGE\",
+            \"currentPrice\": \"${PRICE}€\",
+            \"originalPrice\": \"${ORIG}€\",
+            \"discountPercent\": 25,
+            \"url\": \"https://www.amazon.es/dp/$ASIN?tag=descontoseopo-21\",
+            \"updatedAt\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"
+          }" >> final.txt
+        done
+
+        # Construir JSON final
+        jq -s '.' final.txt > deals.json || echo "[]"
+
+        rm -f products.json page.html final.txt || true
 
     - name: Commit & Push
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
-        commit_message: "🔥 Atualização automática Best Sellers Amazon ES"
+        commit_message: "🔥 Atualização automática Amazon ES"
         file_pattern: "*.json"
