@@ -8,7 +8,6 @@ on:
 jobs:
   update-deals:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
 
     steps:
     - name: Checkout código
@@ -17,22 +16,21 @@ jobs:
     - name: Instalar jq
       run: sudo apt-get update && sudo apt-get install -y jq
 
-    - name: Buscar Ofertas Amazon.es (GoldBox Estável)
+    - name: Buscar Ofertas Amazon.es (GoldBox Estável Oficial)
       run: |
-        # Buscar feed estável da Apify (não expira)
-        curl -s "https://api.apify.com/v2/key-value-stores/QQytVQW9bu5fuw6zH/records/OUTPUT?clean=true" > raw.json
+        curl -s "https://api.apify.com/v2/actor-tasks/apify~amazon-goldbox-crawler/runs/last/dataset/items?clean=true&format=json" > raw.json
 
         cat << 'EOF' > filter.jq
         [
-          .deals[]
-          | select(.oldPrice != null and .price != null and (.oldPrice > .price))
+          .[]
+          | select(.asin != null and .currentPrice != null and .beforePrice != null and (.beforePrice > .currentPrice))
           | {
               title: .title,
               asin: .asin,
               image: .image,
-              originalPrice: .oldPrice,
-              currentPrice: .price,
-              discountPercent: (((.oldPrice - .price) / .oldPrice) * 100 | floor),
+              originalPrice: .beforePrice,
+              currentPrice: .currentPrice,
+              discountPercent: (((.beforePrice - .currentPrice) / .beforePrice) * 100 | floor),
               url: ("https://www.amazon.es/dp/" + .asin + "?tag=descontoseopo-21"),
               created: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
             }
@@ -46,7 +44,7 @@ jobs:
     - name: Validar dados
       run: |
         COUNT=$(jq length deals.json)
-        echo "✅ Encontrados $COUNT descontos válidos"
+        echo "✅ Encontrados $COUNT produtos com desconto"
         if [ "$COUNT" -eq 0 ]; then
           echo "⚠️ Nenhum desconto válido encontrado"
           exit 1
@@ -55,5 +53,5 @@ jobs:
     - name: Commit & Push resultados
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
-        commit_message: "🤖 Atualização automática Amazon ES"
+        commit_message: "🤖 Atualização automática de descontos Amazon ES"
         file_pattern: '*.json'
