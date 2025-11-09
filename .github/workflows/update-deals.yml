@@ -2,18 +2,19 @@ name: Atualizar Descontos Amazon ES
 
 on:
   schedule:
-    - cron: "*/15 * * * *" # a cada 15 minutos
+    - cron: "*/15 * * * *" # Executa a cada 15 minutos
   workflow_dispatch:
 
 jobs:
   update-deals:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
     - name: Checkout repositório
       uses: actions/checkout@v4
 
-    - name: Instalar dependências
+    - name: Instalar dependências necessárias
       run: |
         sudo apt-get update
         sudo apt-get install -y jq curl unzip
@@ -26,29 +27,15 @@ jobs:
       run: |
         curl -s "https://www.amazon.es/gp/bestsellers" > page.html
 
-    - name: Extrair produtos (ASIN, Título, Imagem)
+    - name: Extrair ASIN / Título / Imagem
       run: |
-        # Extração HTML → JSON básico
         pup 'div.zg-grid-general-faceout json{}' < page.html > raw-products.json
 
-        # Filtro jq protegido com HEREDOC (não quebra o //)
         cat << 'EOF' > filter.jq
         map({
-          asin: (
-            .["data-p13n-asin-metadata"]
-            | fromjson?
-            | .asin // empty
-          ),
-          title: (
-            .a?["title"]
-            // .img?["alt"]
-            // "Produto Amazon"
-          ),
-          image: (
-            .img?["src"]
-            // .img?["data-src"]
-            // null
-          )
+          asin: (.["data-p13n-asin-metadata"] | fromjson? | .asin // empty),
+          title: (.a?["title"] // .img?["alt"] // "Produto Amazon"),
+          image: (.img?["src"] // .img?["data-src"] // null)
         })
         | map(select(.asin != null))
         EOF
@@ -56,7 +43,7 @@ jobs:
         jq -f filter.jq raw-products.json > products.json
         rm filter.jq raw-products.json page.html
 
-    - name: Obter preços e construir deals.json
+    - name: Obter preços e gerar deals.json final
       run: |
         rm -f final.txt || true
 
@@ -70,7 +57,6 @@ jobs:
             | head -n 1 \
             | tr -d '.')
 
-          # Se não houver preço → ignorar
           if [ -z "$PRICE" ]; then
             continue
           fi
@@ -89,11 +75,16 @@ jobs:
           }" >> final.txt
         done
 
-        jq -s '.' final.txt > deals.json || echo "[]"
+        jq -s '.' final.txt > deals.json || echo "[]" > deals.json
         rm -f final.txt
 
-    - name: Commit & Push
-      uses: stefanzweifel/git-auto-commit-action@v5
-      with:
-        commit_message: "🔥 Atualização automática Amazon ES"
-        file_pattern: "*.json"
+    - name: Commit & Push resultados corrigido (sem conflitos)
+      run: |
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+
+        git pull --rebase origin main || true
+
+        git add deals.json
+        git commit -m "🔥 Atualização automática Amazon ES" || true
+        git push origin HEAD:main || true
