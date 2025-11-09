@@ -10,32 +10,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout
+    - name: Checkout código
       uses: actions/checkout@v4
 
     - name: Instalar jq
       run: sudo apt-get update && sudo apt-get install -y jq
 
-    - name: Buscar Descontos da Amazon (via Chollometro)
+    - name: Buscar Descontos Amazon.es (Chollometro - Estável)
       run: |
-        curl -s "https://www.chollometro.com/rest_api/v3/deals?page=1&per_page=100&search=amazon.es" \
-        | jq '[.data[]
-            | select(.price_old != null and .price != null)
-            | {
-                title: .title,
-                asin: (
-                  try (.url | match("dp/([A-Z0-9]{10})").captures[0].string)
-                  catch "UNKNOWN"
-                ),
-                image: .thumbnail,
-                originalPrice: .price_old,
-                currentPrice: .price,
-                discountPercent: (((.price_old - .price) / .price_old) * 100 | floor)
-              }
-          ]' > deals.json
+        curl -s "https://www.chollometro.com/rest_api/v3/deals?page=1&per_page=100&search=amazon.es" > raw.json
 
-    - name: Commit & Push
+        cat << 'EOF' | jq -f - raw.json > deals.json
+        [
+          .data[] 
+          | select(.price_old != null and .price != null)
+          | {
+              title: .title,
+              asin: (
+                try (.url | match("dp/([A-Z0-9]{10})").captures[0].string)
+                catch "UNKNOWN"
+              ),
+              image: .thumbnail,
+              originalPrice: .price_old,
+              currentPrice: .price,
+              discountPercent: (((.price_old - .price) / .price_old) * 100 | floor)
+            }
+        ]
+        EOF
+
+    - name: Commit & Push resultados
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
-        commit_message: "Atualização automática"
-
+        commit_message: "Atualização automática ✅"
