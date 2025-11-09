@@ -2,7 +2,7 @@ name: Atualizar Promos Amazon
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # Atualiza a cada 15 minutos
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -18,17 +18,14 @@ jobs:
 
     - name: Obter Promoções da Amazon (Apify)
       run: |
-        curl -X POST "https://api.apify.com/v2/acts/zuzka~amazon-seller-scraper/run-sync?token=$APIFY_TOKEN" \
+        curl -X POST "https://api.apify.com/v2/actor-tasks/apify~amazon-bestsellers/run-sync?token=$APIFY_TOKEN" \
         -H "Content-Type: application/json" \
-        -d '{"country":"es","maxItems":24}' \
+        -d '{"maxItems": 40, "country": "ES"}' \
         | jq '.items' > deals.json
       env:
         APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
 
     - name: Commit & Push
-      run: |
-        git config user.name "github-actions"
-        git config user.email "actions@github.com"
-        git add deals.json
-        git commit -m "Atualização automática $(date)" || echo "Sem alterações"
-        git push
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "Atualização automática"
