@@ -21,10 +21,11 @@ jobs:
         curl -X POST "https://api.apify.com/v2/acts/epctex~amazon-scraper/run-sync?token=$APIFY_TOKEN" \
         -H "Content-Type: application/json" \
         -d '{
-              "search": "deal",
               "country": "ES",
-              "maxItems": 40,
-              "includeOffers": true
+              "maxItems": 60,
+              "includeOffers": true,
+              "dealTypes": ["DEAL_OF_THE_DAY", "LIGHTNING_DEAL"],
+              "minDiscountPercentage": 25
             }' \
         | jq '.output.results // .results // .data // []' > deals.json
       env:
