@@ -23,11 +23,14 @@ jobs:
             | select(.price_old != null and .price != null)
             | {
                 title: .title,
-                asin: (.url | capture("dp/([A-Z0-9]{10})")?.captures[0].string // "UNKNOWN"),
+                asin: (
+                  try (.url | match("dp/([A-Z0-9]{10})").captures[0].string)
+                  catch "UNKNOWN"
+                ),
                 image: .thumbnail,
                 originalPrice: .price_old,
                 currentPrice: .price,
-                discountPercent: ((.price_old - .price) / .price_old * 100 | floor)
+                discountPercent: (((.price_old - .price) / .price_old) * 100 | floor)
               }
           ]' > deals.json
 
