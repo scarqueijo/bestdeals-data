@@ -1,43 +1,228 @@
-name: Atualizar Descontos Amazon ES (PA-API Oficial)
+name: Atualizar Descontos Amazon ES
 
+# Agenda: a cada 15 minutos + trigger manual
 on:
   schedule:
-    - cron: "*/15 * * * *"   # Atualiza a cada 15 minutos
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  fetch-deals:
+  update-deals:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout
+      - name: Checkout (fetch full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Instalar Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
-
       - name: Instalar dependências
-        run: npm install amazon-paapi@1.0.7
-
-      - name: Executar script de recolha
-        run: node fetch-deals.js
-        env:
-          PAAPI_ACCESS_KEY: ${{ AKPAK4QL151762723824 }}
-          PAAPI_SECRET_KEY: ${{ x2AFI7Z08/PlInoC4/2irL742O71Z2uo0YZ5HhgU }}
-          PAAPI_PARTNER_TAG: ${{ descontoseopo-21 }}
-
-      - name: Commit & Push resultados
         run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+
+      - name: Preparar ambiente
+        env:
+          TMPDIR: /home/runner/work/_temp
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          rm -f raw.json raw2.json deals.tmp deals.json summary.json
+
+      - name: Tentar fonte 1 — Apify (dataset estável) com retries
+        id: apify
+        env:
+          APIFY_DATASET_URL: ${{ secrets.APIFY_DATASET_URL }} # ex: https://api.apify.com/v2/datasets/ID/items?format=json&clean=true&token=...
+        run: |
+          set -euo pipefail
+          if [ -z "${APIFY_DATASET_URL:-}" ]; then
+            echo "APIFY_NOT_CONFIGURED=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # tenta 3x com timeout
+          for i in 1 2 3; do
+            echo "Apify attempt $i..."
+            curl -fsS --max-time 30 "${APIFY_DATASET_URL}" -o raw.json && break || {
+              echo "Apify attempt $i failed"
+              sleep $((i * 2))
+            }
+          done
+
+          if [ -s raw.json ]; then
+            echo "APIFY_OK=true" >> $GITHUB_OUTPUT
+          else
+            echo "APIFY_OK=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Tentar fonte 2 — Pepper API (fallback)
+        id: pepper
+        env:
+          PEPPER_URL: ${{ secrets.PEPPER_URL }} # ex: "https://api.pepper.com/v1/deals?domains=amazon.es&limit=100&api_key=..."
+        run: |
+          set -euo pipefail
+          if [ -f raw.json ] && [ -s raw.json ]; then
+            echo "SKIP_PEPPER=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if [ -z "${PEPPER_URL:-}" ]; then
+            echo "PEPPER_NOT_CONFIGURED=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          for i in 1 2 3; do
+            echo "Pepper attempt $i..."
+            curl -fsS --max-time 30 "${PEPPER_URL}" -o raw2.json && break || {
+              echo "Pepper attempt $i failed"
+              sleep $((i * 2))
+            }
+          done
+
+          if [ -s raw2.json ]; then
+            echo "PEPPER_OK=true" >> $GITHUB_OUTPUT
+          else
+            echo "PEPPER_OK=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Tentar fonte 3 — Chollometro (fallback)
+        id: chollo
+        run: |
+          set -euo pipefail
+          if [ -f raw.json ] && [ -s raw.json ] || [ -f raw2.json ] && [ -s raw2.json ]; then
+            echo "SKIP_CHOLLO=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          CHOLLO_URL="https://www.chollometro.com/rest_api/v3/deals?page=1&per_page=100&search=amazon.es"
+          for i in 1 2 3; do
+            echo "Chollometro attempt $i..."
+            curl -fsS --max-time 30 -A "bestdeals-bot/1.0" "$CHOLLO_URL" -o raw_chollo.json && break || {
+              echo "Chollometro attempt $i failed"
+              sleep $((i * 2))
+            }
+          done
+
+          if [ -s raw_chollo.json ]; then
+            echo "CHOLLO_OK=true" >> $GITHUB_OUTPUT
+          else
+            echo "CHOLLO_OK=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Normalizar fonte para JSON único (tenta apify -> pepper -> chollo)
+        run: |
+          set -euo pipefail
+          # Prioridade Apify -> Pepper -> Chollo
+          if [ -s raw.json ]; then
+            mv raw.json source.json
+            echo "USING=APIFY"
+          elif [ -s raw2.json ]; then
+            mv raw2.json source.json
+            echo "USING=PEPPER"
+          elif [ -s raw_chollo.json ]; then
+            mv raw_chollo.json source.json
+            echo "USING=CHOLLO"
+          else
+            echo "Nenhuma fonte devolveu dados válidos - abortando"
+            exit 1
+          fi
+
+          # dump first 4000 chars for logs (debug)
+          echo "--- source.json head ---"
+          head -c 4000 source.json || true
+          echo
+          echo "------------------------"
+
+      - name: Extrair / Filtrar com jq (saída canonical)
+        run: |
+          set -euo pipefail
+          # Filtro genérico e resiliente: tenta deteção de campos comuns
+          cat source.json \
+          | jq -c '
+            def safe_str(x): (x // "" | tostring);
+            def get_asin(url):
+              ( (url // "") | tostring |
+                (capture("dp/(?<a>[A-Z0-9]{10})").a?) // 
+                (capture("/product/(?<a>[A-Z0-9]{10})").a?) //
+                (capture("/gp/product/(?<a>[A-Z0-9]{10})").a?) //
+                null
+              );
+            ;
+            # suporte a várias estruturas: apify/pepper/chollo
+            (if type=="array" then .[] else . end)
+            | {
+                title: (.title // .name // .headline // (.a?["title"] // .img?["alt"]) // "Produto Amazon"),
+                url: (.url // .link // .product_url // .productUrl // .permalink // null),
+                image: (.image // .imageUrl // .thumbnail // .img?["src"] // .img?["data-src"] // null),
+                originalPrice: (.originalPrice // .price_old // .priceOriginal // .old_price // null),
+                price: (.price // .currentPrice // .price_new // .new_price // .deal_price // null),
+                currency: (.currency // "EUR"),
+                asin: ( ( .asin // .asin_code // get_asin(.url) // get_asin(.link) // get_asin(.product_url) ) ),
+                discountPercent: (.discount // .discountPercent // null),
+                source: ( .source // ._source // null ),
+                raw: .
+              }
+            | select(.price != null and (.asin != null and (.asin | tostring | length) > 0))
+          ' > deals.tmp || true
+
+          # compact and sort by discountPercent if available
+          cat deals.tmp | jq -s 'sort_by( (.[0].discountPercent // 0) * -1 )' > deals.json || true
+
+          # criar um resumo
+          cat deals.json | jq 'map({title: .title, asin:.asin, price:.price, original:.originalPrice, discount:.discountPercent, url:.url})' > summary.json || true
+
+          # valida
+          if [ ! -s deals.json ] || [ "$(jq length deals.json)" -eq 0 ]; then
+            echo "Nenhum desconto válido após filtragem"
+            exit 1
+          fi
+
+      - name: Mostrar resumo (logs)
+        run: |
+          set -euo pipefail
+          echo "Total deals: $(jq length deals.json)"
+          echo "Top 5 (summary):"
+          jq '.[0:5]' summary.json
+
+      - name: Preparar commit (evitar conflitos non-fast-forward)
+        env:
+          BRANCH: main
+        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main || true
-          git add deals.json
-          git commit -m "🤖 Atualização automática Amazon ES via PA-API" || true
-          git push origin HEAD:main || true
+          git config user.email "actions@github.com"
+          # obter a branch remota actual e rebase localmente para evitar push rejected
+          git fetch origin "${BRANCH}"
+          git checkout -B "${BRANCH}" "origin/${BRANCH}"
+          git pull --rebase origin "${BRANCH}" || true
+          # mover outputs para repositório
+          mkdir -p data
+          mv deals.json data/deals.json
+          mv summary.json data/summary.json
+
+      - name: Commit & Push (usa PAT para evitar 403 em branches protegidas)
+        env:
+          PAT: ${{ secrets.PAT }}        # criar Personal Access Token nas instruções abaixo
+          BRANCH: main
+        run: |
+          set -euo pipefail
+          git add data/deals.json data/summary.json || true
+          if git diff --staged --quiet; then
+            echo "Sem alterações para commitar."
+            exit 0
+          fi
+          git commit -m "🤖 Atualização automática descontos Amazon ES - $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || true
+
+          # configurar remote com token para push
+          REPO=https://x-access-token:${PAT}@github.com/${{ github.repository }}.git
+          git remote set-url origin "${REPO}"
+          # tenta push com rebase/force se necessário (cuidado com force)
+          git push origin "HEAD:${BRANCH}" --set-upstream || {
+            echo "Push falhou, a tentar forçar (force-with-lease)..."
+            git push origin "HEAD:${BRANCH}" --force-with-lease
+          }
+
+      - name: Resultado final
+        run: |
+          echo "Workflow concluído com sucesso."
+          echo "Ficheiros atualizados: data/deals.json, data/summary.json"
